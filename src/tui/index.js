@@ -215,14 +215,30 @@ async function main() {
     // TODO: Extract widget creation to a helper function
     // Create input based on type (logic is the same as before)
     if (question.possible_answers && question.possible_answers.length > 0) {
-        const items = question.possible_answers.map(ans => ans.label || ans.value.toString());
+        // Handle both object {label, value} and primitive string/number answers
+        const items = question.possible_answers.map(ans => {
+          if (typeof ans === 'object' && ans !== null) {
+            return ans.label || (ans.value !== undefined && ans.value !== null ? ans.value.toString() : ''); // Use label if available, else value as string
+          } else if (ans !== undefined && ans !== null) {
+            return ans.toString(); // Handle primitive types directly
+          }
+          return ''; // Fallback for unexpected null/undefined in array
+        });
         const list = blessed.list({ /* ... options ... */ parent: resultsOrInputContainer, items: items, top:0, bottom:0, left:0, right:0, border:'line', keys:true, vi:true, mouse:true, style:{selected:{bg:'blue'}, item:{fg:'white'}}});
         list.focus();
         activeInputElement = list;
         list.on('select', (item, index) => {
             const selectedAnswer = question.possible_answers[index];
-            const answerValue = selectedAnswer?.value ?? null;
-            if (answerValue !== null) {
+            // Handle selection for both object {value, label} and primitive answers
+            let answerValue = null;
+            if (typeof selectedAnswer === 'object' && selectedAnswer !== null) {
+              answerValue = selectedAnswer.value; // Get value from object
+            } else {
+              answerValue = selectedAnswer; // Use primitive value directly
+            }
+            
+            // Ensure value is not undefined/null before submitting
+            if (answerValue !== undefined && answerValue !== null) {
                 qaHistory.push({ questionText: currentQuestion?.question_text, answerValue });
                 submitAnswer(question.question_key, answerValue);
             }

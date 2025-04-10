@@ -160,6 +160,8 @@ FROM (VALUES
     ('is_ex_bankrupt_discharged_lt_2y', 'is_bankrupt'),
     -- Ask about Adverse Repay History only if Payday Enquiry = Yes
     ('has_adverse_repayment_history_last_12m', 'has_payday_loan_enquiry_last_6m'),
+    -- Ask Has Adverse Credit only after bankruptcy status is known
+    ('has_adverse_credit_events', 'is_bankrupt'),
     -- Ask Casual Industry only if Emp Status = Casual (Value-based dependency - backend logic might enforce this better)
     ('employment_industry_casual', 'employment_status'),
     -- Ask Savings Duration only if Savings Amount > 0 (Value-based dependency - backend logic needed for precise $50k check for Tier A)

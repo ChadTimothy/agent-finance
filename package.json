@@ -7,8 +7,11 @@
     "test": "tests"
   },
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
+    "start": "node proxy.js",
+    "dev:proxy": "node proxy.js",
+    "dev:backend": "node src/server.js",
+    "dev:frontend": "cd web && npm run dev",
+    "dev": "concurrently \"npm run dev:proxy\" \"npm run dev:backend\" \"npm run dev:frontend\"",
     "tui": "node src/tui/index.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
     "seed:remote": "node scripts/seedRemoteDb.js"
@@ -21,13 +24,16 @@
     "@supabase/supabase-js": "^2.49.4",
     "axios": "^1.8.4",
     "blessed": "^0.1.81",
+    "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "express": "^5.1.0",
-    "express-validator": "^7.2.1"
+    "express": "^4.18.2",
+    "express-validator": "^7.2.1",
+    "http-proxy-middleware": "^2.0.6"
   },
   "devDependencies": {
     "jest": "^29.7.0",
     "nodemon": "^3.1.9",
-    "supertest": "^7.1.0"
+    "supertest": "^7.1.0",
+    "concurrently": "^8.2.2"
   }
 }

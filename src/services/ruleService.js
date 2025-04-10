@@ -24,6 +24,20 @@ function parseListEnvVar(envVar, defaultValue) {
 }
 
 // Define Default Configuration
+// Cache for question IDs to avoid repeated DB calls
+const questionIdCache = new Map();
+
+// Credit history question key constants
+const CREDIT_QUESTIONS = {
+  DEFAULT_OVER_1K: 'has_default_over_1k',
+  DEFAULT_LAST_6M: 'has_default_last_6_months',
+  RHI_LAST_12M: 'has_rhi_2_last_12_months',
+  COURT_WRIT: 'has_court_writ_judgement',
+  ADVERSE_CREDIT: 'has_adverse_credit',
+  ADVERSE_EXPLANATION: 'has_adverse_credit_explanation',
+  BANKRUPTCY: 'bankruptcy_status'
+};
+
 const DEFAULT_SCORING_CONFIG = {
   WEIGHT_ELIMINATION: 0.2,
   WEIGHT_RATE_DIFF: 0.4,
@@ -437,8 +451,15 @@ async function getProductRules(productId) {
 
 // Placeholder for DB Dependency Check
 // This function would typically reside in a separate db service file
-async function checkQuestionPrerequisites(dependentQuestionId, answeredQuestionKeys) {
-  // Fetch prerequisite question IDs for the dependent question
+/**
+ * Checks if a question's prerequisites are met, including value-based dependencies.
+ * @param {number} dependentQuestionId - The ID of the question being checked
+ * @param {string[]} answeredQuestionKeys - Array of question keys that have been answered
+ * @param {object} [userAnswers={}] - Map of user answers where key is question_key and value is the answer
+ * @returns {Promise<boolean>} True if prerequisites are met, false otherwise
+ */
+async function checkQuestionPrerequisites(dependentQuestionId, answeredQuestionKeys, userAnswers = {}) {
+  // Fetch prerequisite question IDs and details for the dependent question
   const { data: prerequisites, error: prereqError } = await supabase
     .from('question_dependencies')
     .select('prerequisite_question_id')
@@ -446,7 +467,6 @@ async function checkQuestionPrerequisites(dependentQuestionId, answeredQuestionK
 
   if (prereqError) {
     console.error(`Error fetching prerequisites for question ${dependentQuestionId}:`, prereqError);
-    // Fail safe: assume prerequisites are not met if DB query fails
     return false;
   }
 
@@ -454,33 +474,98 @@ async function checkQuestionPrerequisites(dependentQuestionId, answeredQuestionK
     return true; // No prerequisites, so they are met
   }
 
-  // Fetch the question_key for each prerequisite ID
+  // Fetch the question details for each prerequisite ID
   const prereqIds = prerequisites.map(p => p.prerequisite_question_id);
   const { data: prereqQuestions, error: questionsError } = await supabase
     .from('questions')
-    .select('question_key')
+    .select('question_id, question_key')
     .in('question_id', prereqIds);
 
-  if (questionsError) {
-     console.error(`Error fetching prerequisite question keys for question ${dependentQuestionId}:`, questionsError);
-     return false; // Fail safe
+  if (questionsError || !prereqQuestions || prereqQuestions.length !== prereqIds.length) {
+    console.error(`Error fetching prerequisite question details for ${dependentQuestionId}`);
+    return false;
   }
 
-  if (prereqQuestions.length !== prereqIds.length) {
-      console.warn(`Could not find details for all prerequisite questions for ${dependentQuestionId}`);
-      // Decide handling: fail safe or proceed with found ones? Fail safe is safer.
-      return false;
+ // Initialize cache with these prereq questions if not already cached
+ for (const prereq of prereqQuestions) {
+   if (!questionIdCache.has(prereq.question_key)) {
+     questionIdCache.set(prereq.question_key, prereq.question_id);
+   }
+ }
+
+ // Standard prerequisite check
+ for (const prereq of prereqQuestions) {
+   // First check if the prerequisite is answered
+   if (!answeredQuestionKeys.includes(prereq.question_key)) {
+     console.log(`Prerequisite ${prereq.question_key} not answered for ${dependentQuestionId}`);
+     return false;
+   }
+ }
+
+ // Value-based Dependencies for Credit History Flow
+ 
+ // Find if this is a credit question
+ const questionKey = Object.entries(CREDIT_QUESTIONS)
+   .find(([, key]) => questionIdCache.get(key) === dependentQuestionId)?.[1];
+
+ if (questionKey) {
+   // 1. Check bankruptcy status impact on adverse credit questions
+   if (Object.prototype.hasOwnProperty.call(userAnswers, CREDIT_QUESTIONS.BANKRUPTCY)) {
+     const bankruptcyStatus = userAnswers[CREDIT_QUESTIONS.BANKRUPTCY];
+     const skipAdverseQuestions = bankruptcyStatus === 'Never' || bankruptcyStatus === 'Current';
+     
+     // Skip adverse credit related questions for non-discharged bankrupts
+     if (skipAdverseQuestions &&
+         [CREDIT_QUESTIONS.DEFAULT_OVER_1K, CREDIT_QUESTIONS.DEFAULT_LAST_6M,
+          CREDIT_QUESTIONS.RHI_LAST_12M, CREDIT_QUESTIONS.COURT_WRIT,
+          CREDIT_QUESTIONS.ADVERSE_CREDIT].includes(questionKey)) {
+       console.log(`Skipping ${questionKey} as bankruptcy status is ${bankruptcyStatus}`);
+       return false;
+     }
+   }
+
+   // 2. Check adverse credit explanation dependency
+   if (questionKey === CREDIT_QUESTIONS.ADVERSE_EXPLANATION) {
+     if (Object.prototype.hasOwnProperty.call(userAnswers, CREDIT_QUESTIONS.ADVERSE_CREDIT)) {
+       const hasAdverseCredit = userAnswers[CREDIT_QUESTIONS.ADVERSE_CREDIT];
+       if (!hasAdverseCredit) {
+         console.log('Skipping adverse credit explanation as no adverse credit reported');
+         return false;
+       }
+     }
+   }
+ }
+
+ // If we get here, all checks have passed
+ console.log(`Prerequisites met for question ${dependentQuestionId}`);
+ return true;
+}
+
+/**
+ * Helper to get question ID by key with caching
+ * @param {string} questionKey - The question key to look up
+ * @returns {Promise<number|null>} The question ID if found, null otherwise
+ */
+async function getQuestionIdByKey(questionKey) {
+  // Check cache first
+  if (questionIdCache.has(questionKey)) {
+    return questionIdCache.get(questionKey);
+  }
+  const { data, error } = await supabase
+    .from('questions')
+    .select('question_id')
+    .eq('question_key', questionKey)
+    .single();
+
+  if (error || !data) {
+    console.error(`Error getting question ID for key ${questionKey}:`, error);
+    return null;
   }
 
-  // Check if all prerequisite question keys are in the answered keys set
-  const prereqKeys = prereqQuestions.map(q => q.question_key);
-  const allPrereqsMet = prereqKeys.every(key => answeredQuestionKeys.includes(key));
-
-  // Added Detailed Logging
-  console.log(`DEBUG checkQuestionPrerequisites: DependentQId=${dependentQuestionId}, PrereqKeys=[${prereqKeys.join(', ')}], AnsweredKeys=[${answeredQuestionKeys.join(', ')}], Met=${allPrereqsMet}`);
-
-  // console.log(`Prerequisites check for ${dependentQuestionId}: Required=[${prereqKeys.join(', ')}], Met=${allPrereqsMet}`);
-  return allPrereqsMet;
+  // If found, cache and return the ID
+  const questionId = data.question_id;
+  questionIdCache.set(questionKey, questionId);
+  return questionId;
 }
 
 // This function fetches full details for a given question ID.
@@ -599,6 +684,8 @@ async function filterProducts(potentialProductIds, userAnswers) {
  * @returns {Promise<object|null>} The full question object to ask next, or null if no suitable question found.
  */
 async function selectNextQuestion(potentialProductIds, userAnswers, lastAskedQuestionGroup) {
+  // Default userAnswers to empty object if not provided
+  const answers = userAnswers || {};
   console.log(`DEBUG selectNextQuestion: Checking potentialProductIds: [${potentialProductIds?.join(', ')}]`);
   if (!potentialProductIds || potentialProductIds.length === 0) {
     console.log('No potential products left, cannot select next question.');
@@ -606,7 +693,7 @@ async function selectNextQuestion(potentialProductIds, userAnswers, lastAskedQue
   }
 
   console.log(`Selecting next question from ${potentialProductIds.length} potential products...`);
-  const answeredQuestionKeys = Object.keys(userAnswers);
+  const answeredQuestionKeys = Object.keys(answers);
 
   // 1. Get all applicable rules for the current potential products
   let fetchedSimpleRules = [];
@@ -724,7 +811,7 @@ async function selectNextQuestion(potentialProductIds, userAnswers, lastAskedQue
   // 3. Filter based on prerequisites
   const prerequisiteChecks = await Promise.all(
     unansweredCandidateIds.map(async qId => {
-      const meetsPrereqs = await checkQuestionPrerequisites(qId, answeredQuestionKeys);
+      const meetsPrereqs = await checkQuestionPrerequisites(qId, answeredQuestionKeys, answers);
       return { qId, meetsPrereqs };
     })
   );
@@ -809,6 +896,12 @@ async function selectNextQuestion(potentialProductIds, userAnswers, lastAskedQue
         }
       }
     }
+
+    // Special boost for bankruptcy_status question to ensure it is asked first
+    const bankruptcyQuestionId = await getQuestionIdByKey('bankruptcy_status');
+    if (qId === bankruptcyQuestionId) {
+      eliminationScore += 100;
+    }
     for (const rule of allComplexRules) { // Use de-duplicated list
       if (rule.related_question_ids.includes(qId)) {
         eliminationScore += rule.is_hard_knockout ? 2 : 1;
@@ -874,6 +967,171 @@ const totalScore = (eliminationScore * SCORING_CONFIG.WEIGHT_ELIMINATION) +
   return bestQuestion;
 }
 
+/**
+ * Returns all remaining candidate questions sorted by score and priority.
+ */
+async function getAvailableQuestions(potentialProductIds, userAnswers, lastAskedQuestionGroup) {
+  console.log(`DEBUG getAvailableQuestions: Checking potentialProductIds: [${potentialProductIds?.join(', ')}]`);
+  if (!potentialProductIds || potentialProductIds.length === 0) {
+    console.log('No potential products left, cannot get available questions.');
+    return [];
+  }
+
+  const answeredQuestionKeys = Object.keys(userAnswers);
+
+  // Fetch rules (reuse logic from selectNextQuestion)
+  let fetchedSimpleRules = [];
+  let fetchedComplexRules = [];
+  let relevantLenderIds = [];
+  try {
+    const { data: productsData, error: productsError } = await supabase
+      .from('products')
+      .select('lender_id')
+      .in('product_id', potentialProductIds);
+    if (productsError) throw productsError;
+    relevantLenderIds = productsData ? [...new Set(productsData.map(p => p.lender_id))] : [];
+
+    const simpleOrConditions = ['rule_scope.eq.Global'];
+    if (relevantLenderIds.length > 0) simpleOrConditions.push(`and(rule_scope.eq.Lender,lender_id.in.(${relevantLenderIds.join(',')}))`);
+    if (potentialProductIds.length > 0) simpleOrConditions.push(`and(rule_scope.eq.Product,product_id.in.(${potentialProductIds.join(',')}))`);
+    const { data: simpleData, error: simpleError } = await supabase.from('policy_rules').select('*').or(simpleOrConditions.join(','));
+    if (simpleError) throw simpleError;
+    fetchedSimpleRules = simpleData || [];
+
+    const complexOrConditions = ['rule_scope.eq.Global'];
+    if (relevantLenderIds.length > 0) complexOrConditions.push(`and(rule_scope.eq.Lender,lender_id.in.(${relevantLenderIds.join(',')}))`);
+    if (potentialProductIds.length > 0) complexOrConditions.push(`and(rule_scope.eq.Product,product_id.in.(${potentialProductIds.join(',')}))`);
+    const { data: complexData, error: complexError } = await supabase.from('complex_policy_rules').select('*').or(complexOrConditions.join(','));
+    if (complexError) throw complexError;
+    fetchedComplexRules = complexData || [];
+
+  } catch (error) {
+    console.error('Error fetching rules during getAvailableQuestions:', error);
+    return [];
+  }
+
+  // De-duplicate rules
+  const uniqueSimpleRules = new Map();
+  for (const rule of fetchedSimpleRules) {
+    const lenderPart = rule.rule_scope === 'Lender' ? rule.lender_id : 'null';
+    const productPart = rule.rule_scope === 'Product' ? rule.product_id : 'null';
+    const key = `${rule.rule_scope}:${lenderPart}:${productPart}:${rule.policy_attribute}`;
+    if (!uniqueSimpleRules.has(key)) {
+      uniqueSimpleRules.set(key, rule);
+    }
+  }
+  const uniqueComplexRules = new Map();
+  for (const rule of fetchedComplexRules) {
+    if (!uniqueComplexRules.has(rule.complex_rule_id)) {
+      uniqueComplexRules.set(rule.complex_rule_id, rule);
+    }
+  }
+  const allSimpleRules = Array.from(uniqueSimpleRules.values());
+  const allComplexRules = Array.from(uniqueComplexRules.values());
+
+  // Candidate question IDs
+  const candidateQuestionIds = new Set();
+  for (const rule of allSimpleRules) {
+    if (rule.related_question_id && !Object.prototype.hasOwnProperty.call(userAnswers, rule.policy_attribute)) {
+      candidateQuestionIds.add(rule.related_question_id);
+    }
+  }
+  for (const rule of allComplexRules) {
+    for (const qId of rule.related_question_ids) {
+      candidateQuestionIds.add(qId);
+    }
+  }
+  const candidateIdArray = Array.from(candidateQuestionIds);
+
+  if (candidateIdArray.length === 0) {
+    console.log('No candidate questions found.');
+    return [];
+  }
+
+  // Fetch question details
+  const { data: questionDetails, error: questionError } = await supabase
+    .from('questions')
+    .select('*')
+    .in('question_id', candidateIdArray);
+  if (questionError) {
+    console.error('Error fetching question details:', questionError);
+    return [];
+  }
+  const questionDetailsMap = {};
+  for (const q of questionDetails) {
+    questionDetailsMap[q.question_id] = q;
+  }
+
+  // Score candidates (reuse logic)
+  const scoredCandidates = [];
+  for (const qId of candidateIdArray) {
+    const details = questionDetailsMap[qId];
+    if (!details) continue;
+
+    let eliminationScore = 0;
+    let rateDiffScore = 0;
+    const dependencyScore = 0;
+
+
+    for (const rule of allSimpleRules) {
+      if (rule.related_question_id === qId) {
+        eliminationScore += rule.is_hard_knockout ? 2 : 1;
+        if (SCORING_CONFIG.RATE_INFLUENCING_CATEGORIES.includes(rule.policy_category)) {
+          rateDiffScore = 1;
+        }
+      }
+    }
+    for (const rule of allComplexRules) {
+      if (rule.related_question_ids.includes(qId)) {
+        eliminationScore += rule.is_hard_knockout ? 2 : 1;
+        if (SCORING_CONFIG.RATE_INFLUENCING_CATEGORIES.includes(rule.policy_category)) {
+          rateDiffScore = 1;
+        }
+      }
+    }
+
+    let flowScore = (1 / (details.display_priority || 1)) * 0.1;
+    const currentGroupIndex = SCORING_CONFIG.QUESTION_GROUP_ORDER.indexOf(details.question_group);
+    const lastGroupIndex = lastAskedQuestionGroup ? SCORING_CONFIG.QUESTION_GROUP_ORDER.indexOf(lastAskedQuestionGroup) : -1;
+
+    if (lastAskedQuestionGroup === null || lastGroupIndex === -1) {
+      flowScore += 0.1;
+    } else if (details.question_group === lastAskedQuestionGroup) {
+      flowScore += 1.0;
+    } else if (currentGroupIndex === lastGroupIndex + 1) {
+      flowScore += 0.5;
+    }
+
+    const totalScore = (eliminationScore * SCORING_CONFIG.WEIGHT_ELIMINATION) +
+                       (rateDiffScore * SCORING_CONFIG.WEIGHT_RATE_DIFF) +
+                       (flowScore * SCORING_CONFIG.WEIGHT_FLOW) +
+                       (dependencyScore * SCORING_CONFIG.WEIGHT_DEPENDENCY);
+
+    scoredCandidates.push({
+      question_id: qId,
+      question_key: details.question_key,
+      question_text: details.question_text,
+      answer_type: details.answer_type,
+      possible_answers: details.possible_answers,
+      validation_rules: details.validation_rules,
+      question_group: details.question_group,
+      display_priority: details.display_priority,
+      score: totalScore
+    });
+  }
+
+  scoredCandidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.display_priority - b.display_priority;
+  });
+
+  return {
+    scoredCandidates,
+    candidateQuestionIds: candidateIdArray
+  };
+}
+
+
 
 // --- Exports ---
 export {
@@ -881,5 +1139,6 @@ export {
   evaluateComplexRule,
   isProductEligible,
   filterProducts,
-  selectNextQuestion // Added selectNextQuestion
+  selectNextQuestion,
+  getAvailableQuestions
 };

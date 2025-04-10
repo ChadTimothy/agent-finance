@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import cors from 'cors';
+ 
 // Load environment variables
 dotenv.config();
 
@@ -13,6 +15,26 @@ const PORT = process.env.PORT || 3001; // Use environment variable or default
 
 // Middleware
 app.use(express.json()); // Parse JSON request bodies
+
+// Enable CORS with dynamic origin checking
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Allow localhost and ngrok domains
+    if (
+      origin.startsWith('http://localhost:') ||
+      origin.includes('ngrok-free.app')
+    ) {
+      return callback(null, true);
+    }
+
+    console.log('Origin not allowed:', origin);
+    return callback(null, false);
+  },
+  credentials: true
+}));
 
 // API Routes
 app.use('/api', sessionRoutes); // Mount session routes under /api

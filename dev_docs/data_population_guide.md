@@ -174,3 +174,126 @@
 **Recommendation:**
 
 Create spreadsheets or structured documents mapping the lender PDF information to these table structures first. This makes review easier before committing data to Supabase or writing final SQL seed scripts. Pay close attention to detail, especially with rule logic and IDs.
+
+---
+
+## Best Practices and Learnings
+
+### 1. Standardized Boolean Answers
+For questions requiring Yes/No answers, use the following standardized format in the `possible_answers` field:
+```json
+[
+  {"value": true, "label": "Yes"},
+  {"value": false, "label": "No"}
+]
+```
+This ensures consistency across the application and simplifies rule evaluation.
+
+### 2. Handling Calculated Fields
+Some lender rules rely on calculated values (e.g., LVR, DTI ratios) that aren't directly asked questions. Handle these by:
+
+1. Creating separate questions for the components (e.g., `property_value` and `loan_amount` for LVR)
+2. Using `complex_policy_rules` to implement the calculation logic
+3. Documenting the calculation method in the rule's `failure_message`
+
+Example for LVR calculation:
+```json
+{
+  "operator": "AND",
+  "conditions": [
+    {
+      "operator": "/",
+      "conditions": [
+        {"attribute": "loan_amount", "op": "value"},
+        {"attribute": "property_value", "op": "value"}
+      ],
+      "op": "<=",
+      "value": 0.8
+    }
+  ]
+}
+```
+
+### 3. Product Variants Pattern
+When products have complex tiering based on applicant profiles:
+
+1. Create separate product entries for each major variant
+2. Use a consistent naming pattern: `{base_product_name} - {variant_type}`
+3. Link variants through the `notes` field in the `products` table
+4. Create specific rules for each variant
+
+Example:
+```sql
+-- Base product
+INSERT INTO products (product_name, ...) 
+VALUES ('Pepper Essential', ...);
+
+-- Variants
+INSERT INTO products (product_name, notes, ...)
+VALUES 
+  ('Pepper Essential - Prime', 'Variant of Pepper Essential for prime customers', ...),
+  ('Pepper Essential - Near Prime', 'Variant of Pepper Essential for near-prime customers', ...);
+```
+
+### 4. PostgreSQL Array Types
+When working with array fields:
+
+- `asset_types_allowed` (TEXT[]): Use consistent terminology across lenders
+  ```sql
+  -- Good
+  asset_types_allowed = '{"New Car", "Used Car", "Motorcycle"}'
+  
+  -- Avoid
+  asset_types_allowed = '{"New Vehicle", "Second Hand Auto", "Motorbike"}'
+  ```
+
+- `related_question_ids` (INT[]): Always verify foreign key relationships
+  ```sql
+  -- Verify questions exist before creating dependencies
+  SELECT question_id FROM questions 
+  WHERE question_id = ANY(ARRAY[10, 15, 22]);
+  ```
+
+### 5. Managing Primary/Foreign Key Relationships
+When creating seed scripts:
+
+1. Use variables or temporary tables to store generated IDs
+2. Insert data in the correct order: lenders → products → questions → rules
+3. Verify foreign key relationships before insertion
+4. Use transaction blocks to ensure data consistency
+
+Example seed script structure:
+```sql
+BEGIN;
+
+-- Store lender ID
+WITH inserted_lender AS (
+  INSERT INTO lenders (lender_name)
+  VALUES ('New Lender')
+  RETURNING lender_id
+)
+-- Use the ID for products
+INSERT INTO products (lender_id, product_name, ...)
+SELECT lender_id, 'Product Name', ...
+FROM inserted_lender;
+
+COMMIT;
+```
+
+### 6. Question Grouping Strategy
+Group questions logically to improve the user experience:
+
+1. Use consistent `question_group` values across lenders
+2. Set `display_priority` to ensure logical flow
+3. Consider dependencies when ordering questions
+
+Recommended question groups:
+- `ApplicantInfo`: Basic personal details
+- `Employment`: Work status and history
+- `Income`: All income sources
+- `Expenses`: Living expenses and commitments
+- `Assets`: Property, vehicles, savings
+- `Liabilities`: Existing loans and debts
+- `LoanDetails`: Specific loan requirements
+
+Remember to maintain consistency in naming and structure across all lenders to ensure the engine can effectively compare and evaluate products.

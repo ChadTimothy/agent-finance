@@ -510,4 +510,30 @@ router.get('/canvas/data', async (req, res, next) => {
 });
 
 
+import { getAvailableQuestions } from '../services/ruleService.js';
+
+router.get('/sessions/:sessionId/available_questions', async (req, res, next) => {
+  const { sessionId } = req.params;
+  try {
+    const session = await getSessionState(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: { message: `Session with ID '${sessionId}' not found.` } });
+    }
+
+    const { scoredCandidates, candidateQuestionIds } = await getAvailableQuestions(
+      session.potential_product_ids,
+      session.user_answers,
+      session.last_asked_question_group
+    );
+
+    res.status(200).json({
+      availableQuestions: scoredCandidates,
+      candidateQuestionIds
+    });
+  } catch (error) {
+    console.error(`Error in GET /sessions/${sessionId}/available_questions:`, error);
+    next(error);
+  }
+});
+
 export default router;
